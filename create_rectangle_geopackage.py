@@ -77,7 +77,7 @@ def download_swissalti3d(buffered_rectangle_gpkg):
     items_url = f"{STAC_API_URL}/collections/{SWISSALTI3D_COLLECTION}/items?bbox={','.join(map(str, bbox))}&limit=10&sortby=-datetime"
     print(f"Trying to connect to STAC API: ")
     try:
-        response = requests.get(items_url)
+        response = requests.get(items_url,timeout=15)
         items = response.json().get("features", [])
     except requests.exceptions.RequestException as e:
         print(f"Failed to connect to STAC API: {e}")
@@ -104,7 +104,7 @@ def download_swissalti3d(buffered_rectangle_gpkg):
 
                 print(f"Downloading {asset_url} to {asset_filename}")
                 try:
-                    asset_data = requests.get(asset_url)
+                    asset_data = requests.get(asset_url,timeout=15)
                     asset_data.raise_for_status()  # Raise an error for bad responses
 
                     with open(asset_filename, "wb") as f:
@@ -191,7 +191,7 @@ def clip_with_buffer(buffered_rectangle_gpkg, input_tif, output_tif="swissalti_c
 
     print(f"Clipped TIFF file saved as '{output_tif}'")
 
-def generate_contours( interval):
+def generate_contours(interval):
     """
     Generates contour lines from a raster using gdal_contour.
 
@@ -216,37 +216,38 @@ def generate_contours( interval):
     ]
 
     try:
-        subprocess.run(command, check=True)
+        subprocess.run(command)#, check=True)
         print(f"Contour lines saved to '{output_gpkg}'")
     except subprocess.CalledProcessError as e:
         print(f"Error generating contours: {e}")
 
-def smooth_geometry():
+
+def smooth_geometry(interval):
     """
     Smooths the geometry of the lines in the specified input file using QGIS processing.
 
-    :param input_file: The path to the input file (GeoPackage, Shapefile, etc.).
-    :param output_file: The path where the smoothed geometry will be saved.
+    : interval soothing minimum distance. Will be half of the interval
     """
     input_file = os.path.join(output_folder, "contour.gpkg|layername=contour")
     output_file = os.path.join(output_folder, "contour_smoothed.gpkg")
+    offset=interval/2
     # Define the QGIS process command
     command = [
-        "qgis_process",  # Ensure qgis_process is in your PATH
+        "/usr/bin/qgis_process",  # Ensure qgis_process is in your PATH
         "run", "native:smoothgeometry",
         "--distance_units=meters",
         "--area_units=m2",
         "--ellipsoid=EPSG:7004",
         f"--INPUT={input_file}",
-        "--ITERATIONS=1",
-        "--OFFSET=0.25",
+        "--ITERATIONS=2",
+        f"--OFFSET={offset}",
         "--MAX_ANGLE=180",
         f"--OUTPUT={output_file}"
     ]
 
     try:
         # Run the command
-        result = subprocess.run(command, check=True, capture_output=True, text=True)
+        result = subprocess.run(command)#, check=True, capture_output=True, text=True)
         print("Smoothing completed successfully.")
         print(result.stdout)
     except subprocess.CalledProcessError as e:
@@ -390,7 +391,7 @@ def export_to_image_pdf(interval):
 
 def check_qgis_installed():
     try:
-        subprocess.run(["qgis_process", "--version"], check=True, capture_output=True, text=True)
+        subprocess.run(["/usr/bin/qgis_process", "--version"])#, check=True, capture_output=True, text=True)
         print("QGIS is installed and accessible.")
     except FileNotFoundError:
         print("Warning: QGIS is not installed or not in PATH. This script requires QGIS to run properly.")
@@ -436,7 +437,7 @@ if __name__ == "__main__":
     generate_contours(interval=args.interval)
 
     #smooth contours using QGIS
-    smooth_geometry()
+    smooth_geometry(interval=args.interval)
 
     #exporting to PDF DXF and PNG
     export_to_image_pdf(interval=args.interval)
