@@ -1,7 +1,9 @@
 import argparse
 import geopandas as gpd
-from shapely.geometry import Polygon
-from shapely.geometry import LineString
+import pandas as pd
+from shapely.geometry import Polygon,MultiPolygon
+from shapely.geometry import LineString, Point
+from shapely.ops import polygonize
 import numpy as np
 import re
 import os
@@ -15,6 +17,7 @@ import sys
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from matplotlib_scalebar.scalebar import ScaleBar
+
 
 # example call: .venv/bin/python create_rectangle_geopackage.py --bbox "2'604’333/1'197'467 2'604’543/1'197'467 2'604’543/1'197'317 2'604’333/1'197'317" --interval 0.20
 
@@ -221,16 +224,62 @@ def generate_contours(interval):
     except subprocess.CalledProcessError as e:
         print(f"Error generating contours: {e}")
 
+def convert_close_contours_to_polygons(gdf, tolerance=1e-6):
+    """
+    Converts contour lines to polygons if their start and end points are close.
 
-def smooth_geometry(interval):
+    Args:
+        gdf (GeoDataFrame): Input GeoDataFrame containing contour lines.
+        tolerance (float): Maximum distance between start and end points to consider as closed.
+
+    Returns:
+        GeoDataFrame: A new GeoDataFrame with polygons where applicable.
+    """
+    def line_to_polygon(geom):
+        if isinstance(geom, LineString):
+            if geom.is_closed or Point(geom.coords[0]).distance(Point(geom.coords[-1])) <= tolerance:
+                return Polygon(geom)
+        elif isinstance(geom, Polygon):
+            return geom
+        return geom  # Return original geometry if not LineString or Polygon
+
+    # Apply the conversion
+    gdf['geometry'] = gdf['geometry'].apply(line_to_polygon)
+
+    # Filter to keep only Polygon and MultiPolygon geometries
+    return gdf[gdf['geometry'].type.isin(['Polygon', 'MultiPolygon'])]
+
+def process_contours(interval):
+    generate_contours(interval)
+
+    # Read the generated contours
+    contours_gpkg = os.path.join(output_folder, "contour.gpkg")
+    gdf = gpd.read_file(contours_gpkg)
+
+    # Convert close contours to polygons
+    polygons_gdf = convert_close_contours_to_polygons(gdf)
+
+    # Save the polygons
+    polygons_output = os.path.join(output_folder, "contour_polygons.gpkg")
+    polygons_gdf.to_file(polygons_output, driver="GPKG")
+    print(f"Contour polygons saved to '{polygons_output}'")
+
+    # Keep all geometries that are not Polygons or MultiPolygons
+    lines_gdf = gdf[~gdf.geometry.apply(lambda geom: isinstance(geom, (Polygon, MultiPolygon)))]
+
+    # Save the remaining geometries (mostly lines)
+    lines_output = os.path.join(output_folder, "contour_lines.gpkg")
+    lines_gdf.to_file(lines_output, driver="GPKG")
+    print(f"Contour lines saved to '{lines_output}'")
+
+def smooth_geometry(interval,input_file,output_file):
     """
     Smooths the geometry of the lines in the specified input file using QGIS processing.
 
     : interval soothing minimum distance. Will be half of the interval
     """
-    input_file = os.path.join(output_folder, "contour.gpkg|layername=contour")
-    output_file = os.path.join(output_folder, "contour_smoothed.gpkg")
-    offset=interval/2
+
+    offset=interval
     # Define the QGIS process command
     command = [
         "/usr/bin/qgis_process",  # Ensure qgis_process is in your PATH
@@ -239,7 +288,7 @@ def smooth_geometry(interval):
         "--area_units=m2",
         "--ellipsoid=EPSG:7004",
         f"--INPUT={input_file}",
-        "--ITERATIONS=2",
+        "--ITERATIONS=10",
         f"--OFFSET={offset}",
         "--MAX_ANGLE=180",
         f"--OUTPUT={output_file}"
@@ -248,11 +297,35 @@ def smooth_geometry(interval):
     try:
         # Run the command
         result = subprocess.run(command)#, check=True, capture_output=True, text=True)
-        print("Smoothing completed successfully.")
-        print(result.stdout)
+        print(f"Smoothing {output_file} completed successfully.")
+        #print(result.stdout)
     except subprocess.CalledProcessError as e:
-        print(f"An error occurred: {e.stderr}")
+        print(f"An error occurred in {output_file} : {e.stderr}")
 
+def merge_smoothed():
+    # Read the polygon and line files
+    polygons_gdf = gpd.read_file(os.path.join(output_folder, "contour_polygons_smoothed.gpkg"))
+    lines_gdf = gpd.read_file(os.path.join(output_folder, "contour_lines_smoothed.gpkg"))
+
+    # Convert polygons to lines
+    def polygon_to_line(geometry):
+        if geometry.geom_type == 'Polygon':
+            return LineString(geometry.exterior.coords)
+        elif geometry.geom_type == 'MultiPolygon':
+            return MultiLineString([LineString(poly.exterior.coords) for poly in geometry])
+        else:
+            return geometry
+
+    polygons_as_lines = polygons_gdf.copy()
+    polygons_as_lines['geometry'] = polygons_as_lines['geometry'].apply(polygon_to_line)
+
+    # Merge the converted polygons with the existing lines
+    merged_gdf = gpd.GeoDataFrame(pd.concat([polygons_as_lines, lines_gdf], ignore_index=True))
+
+    # Save the merged result
+    output_file = os.path.join(output_folder, "contour_smoothed.gpkg")
+    merged_gdf.to_file(output_file, driver="GPKG")
+    print(f"Merged contours saved to '{output_file}'")
 
 def export_to_image_pdf(interval):
     # Step 1: Read the Contour GeoPackage
@@ -434,10 +507,18 @@ if __name__ == "__main__":
     download_swissalti3d(buffered_gpkg)
 
     #generate contours
-    generate_contours(interval=args.interval)
+    #generate_contours(interval=args.interval)
+    process_contours(interval=args.interval)
+
 
     #smooth contours using QGIS
-    smooth_geometry(interval=args.interval)
+    smooth_geometry(interval=args.interval,
+                    input_file=os.path.join(output_folder, "contour_lines.gpkg|layername=contour_lines"),
+                    output_file=os.path.join(output_folder, "contour_lines_smoothed.gpkg"))
+    smooth_geometry(interval=args.interval,
+                    input_file=os.path.join(output_folder, "contour_polygons.gpkg|layername=contour_polygons"),
+                    output_file=os.path.join(output_folder, "contour_polygons_smoothed.gpkg"))
+    merge_smoothed()
 
     #exporting to PDF DXF and PNG
     export_to_image_pdf(interval=args.interval)
