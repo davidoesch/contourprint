@@ -11,6 +11,7 @@ import requests
 from pyproj import Transformer
 import rasterio
 from rasterio.merge import merge
+from rasterio.warp import calculate_default_transform, reproject, Resampling
 from rasterio.mask import mask
 import subprocess
 import sys
@@ -56,6 +57,7 @@ def create_rectangle_geopackages(coord_string, rectangle_output=os.path.join(out
     print(f"Buffered GeoPackage saved to {buffer_output}")
 
     return buffer_output  # Return the path to the buffered GeoPackage
+
 
 def download_swissalti3d(buffered_rectangle_gpkg):
     """
@@ -127,19 +129,32 @@ def download_swissalti3d(buffered_rectangle_gpkg):
 
     # Merge TIFF files if more than one is found
     if len(tiff_files) > 1:
-        with rasterio.open(tiff_files[0]) as src0:
-            # Read the first image
-            mosaic, out_trans = merge([src0] + [rasterio.open(f) for f in tiff_files[1:]])
 
-        # Write the merged image
-        with rasterio.open(
-            output_filename, 'w', driver='GTiff',
-            height=mosaic.shape[1], width=mosaic.shape[2],
-            count=1, dtype=mosaic.dtype,
-            crs=src0.crs,
-            transform=out_trans,
-        ) as dst:
-            dst.write(mosaic, 1)
+        # Create a list to store the opened raster files
+        src_files_to_mosaic = []
+
+        # Open each TIFF file
+        for fp in tiff_files:
+            src = rasterio.open(fp)
+            src_files_to_mosaic.append(src)
+
+        # Merge the rasters
+        mosaic, out_trans = merge(src_files_to_mosaic)
+
+        # Copy the metadata from one of the source files
+        out_meta = src_files_to_mosaic[0].meta.copy()
+
+        # Update the metadata
+        out_meta.update({
+            "driver": "GTiff",
+            "height": mosaic.shape[1],
+            "width": mosaic.shape[2],
+            "transform": out_trans
+        })
+
+        # Write the mosaic to a new TIFF file
+        with rasterio.open(output_filename, "w", **out_meta) as dest:
+            dest.write(mosaic)
 
         print(f"Merged TIFF files into '{output_filename}'")
     elif tiff_files:
@@ -276,10 +291,10 @@ def smooth_geometry(interval,input_file,output_file):
     """
     Smooths the geometry of the lines in the specified input file using QGIS processing.
 
-    : interval soothing minimum distance. Will be half of the interval
+    : interval smoothing minimum distance.  Normally 0.25m
     """
 
-    offset=interval
+    offset=0.25
     # Define the QGIS process command
     command = [
         "/usr/bin/qgis_process",  # Ensure qgis_process is in your PATH
