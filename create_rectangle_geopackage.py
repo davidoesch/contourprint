@@ -3,6 +3,7 @@ import geopandas as gpd
 import pandas as pd
 from shapely.geometry import Polygon,MultiPolygon
 from shapely.geometry import LineString, Point
+from shapely.geometry import box
 from shapely.ops import polygonize
 import numpy as np
 import re
@@ -22,12 +23,13 @@ from matplotlib_scalebar.scalebar import ScaleBar
 
 # example call: .venv/bin/python create_rectangle_geopackage.py --bbox "2'604’333/1'197'467 2'604’543/1'197'467 2'604’543/1'197'317 2'604’333/1'197'317" --interval 0.20
 
-
+global resample
+global output_folder
+output_folder = os.path.join(os.getcwd(), "swissalti3d_data")
 BUFFER_M = 10
 SWISSALTI3D_COLLECTION = "ch.swisstopo.swissalti3d"
 STAC_API_URL = "https://data.geo.admin.ch/api/stac/v0.9"
-global output_folder
-output_folder = os.path.join(os.getcwd(), "swissalti3d_data")
+
 
 def parse_coordinates(coord_str):
     """
@@ -36,10 +38,18 @@ def parse_coordinates(coord_str):
     x_str, y_str = re.sub(r"[^\d/]", "", coord_str).split("/")
     return int(x_str), int(y_str)
 
-def create_rectangle_geopackages(coord_string, rectangle_output=os.path.join(output_folder,"rectangle.gpkg"), buffer_output=os.path.join(output_folder,"rectangle_buffer.gpkg")):
+def create_rectangle_geopackages(coord_string):
+
     """
     Creates two GeoPackages: one with a rectangle polygon and one with a 10-meter buffer.
+
     """
+    os.makedirs(output_folder, exist_ok=True)
+    rectangle_output=os.path.join(output_folder,"rectangle.gpkg")
+
+    buffer_output=os.path.join(output_folder,"rectangle_buffer.gpkg")
+
+
     coord_strings = coord_string.split()
     if len(coord_strings) != 4:
         raise ValueError("Please provide exactly 4 coordinate pairs for the rectangle.")
@@ -79,7 +89,7 @@ def download_swissalti3d(buffered_rectangle_gpkg):
     bbox = [min_lon, min_lat, max_lon, max_lat]
 
     # Query STAC API for items intersecting the bounding box
-    items_url = f"{STAC_API_URL}/collections/{SWISSALTI3D_COLLECTION}/items?bbox={','.join(map(str, bbox))}&limit=10&sortby=-datetime"
+    items_url = f"{STAC_API_URL}/collections/{SWISSALTI3D_COLLECTION}/items?bbox={','.join(map(str, bbox))}&limit=100&sortby=-datetime"
     print(f"Trying to connect to STAC API: ")
     try:
         response = requests.get(items_url,timeout=15)
@@ -166,11 +176,19 @@ def download_swissalti3d(buffered_rectangle_gpkg):
         print("No TIFF files downloaded.")
 
     # Clip the swissalti.tif with the buffered rectangle
-    clip_with_buffer(buffered_rectangle_gpkg, output_filename)
+    clip_and_resample_dem(buffered_rectangle_gpkg, output_filename,target_resolution=resample)
 
-def clip_with_buffer(buffered_rectangle_gpkg, input_tif, output_tif="swissalti_clipped.tif"):
+
+def clip_and_resample_dem(buffered_rectangle_gpkg, input_tif, output_tif="swissalti_clipped.tif", target_resolution=None):
     """
-    Clips the input TIFF using the buffered rectangle geometry from a GeoPackage and saves the result.
+    Clips the input TIFF using the buffered rectangle geometry from a GeoPackage,
+    optionally resamples to a target resolution with an additional buffer to mitigate edge effects,
+    and saves the result.
+
+    :param buffered_rectangle_gpkg: Path to the GeoPackage containing the buffered rectangle
+    :param input_tif: Path to the input DEM TIFF file
+    :param output_tif: Name of the output TIFF file (default: "swissalti_clipped.tif")
+    :param target_resolution: Target resolution in meters (e.g., 5 for 5m resolution). If None, no resampling is performed.
     """
     # Read the buffered rectangle from the GeoPackage
     buffered_gdf = gpd.read_file(buffered_rectangle_gpkg)
@@ -186,8 +204,20 @@ def clip_with_buffer(buffered_rectangle_gpkg, input_tif, output_tif="swissalti_c
 
     # Open the input TIFF file
     with rasterio.open(input_tif) as src:
-        # Clip the raster with the mask
-        out_image, out_transform = mask(src, [geojson_geom], crop=True)
+        if target_resolution is not None:
+            # Create an additional buffer of 100m for resampling
+            additional_buffer = 100  # meters
+            extended_bounds = box(*buffered_geom.bounds).buffer(additional_buffer)
+            extended_geojson = {
+                "type": "Polygon",
+                "coordinates": [list(extended_bounds.exterior.coords)]
+            }
+
+            # Clip the raster with the extended mask
+            out_image, out_transform = mask(src, [extended_geojson], crop=True)
+        else:
+            # If no resampling, use the original buffered geometry
+            out_image, out_transform = mask(src, [geojson_geom], crop=True)
 
         # Check the shape of out_image and squeeze if necessary
         if out_image.ndim == 3:  # Shape (1, height, width)
@@ -197,17 +227,76 @@ def clip_with_buffer(buffered_rectangle_gpkg, input_tif, output_tif="swissalti_c
         out_meta = src.meta.copy()
         out_meta.update({
             "driver": "GTiff",
-            "height": out_image.shape[0],  # Use height from out_image
-            "width": out_image.shape[1],   # Use width from out_image
+            "height": out_image.shape[0],
+            "width": out_image.shape[1],
             "transform": out_transform,
         })
 
-        # Save the clipped raster to a new file
+        # Resample if target_resolution is specified
+        if target_resolution is not None:
+            # Calculate scaling factor
+            current_resolution = src.res[0]  # Assuming square pixels
+            scale_factor = current_resolution / target_resolution
+
+            # Calculate new dimensions
+            new_height = int(out_image.shape[0] * scale_factor)
+            new_width = int(out_image.shape[1] * scale_factor)
+
+            # Update transform for the new resolution
+            new_transform = rasterio.transform.from_bounds(
+                *rasterio.transform.array_bounds(out_image.shape[0], out_image.shape[1], out_transform),
+                new_width,
+                new_height
+            )
+
+            # Perform resampling
+            resampled_image = np.zeros((1, new_height, new_width), dtype=out_image.dtype)
+            reproject(
+                source=out_image[np.newaxis, :, :],
+                destination=resampled_image,
+                src_transform=out_transform,
+                src_crs=src.crs,
+                dst_transform=new_transform,
+                dst_crs=src.crs,
+                resampling=Resampling.bilinear
+            )
+
+            # Update image and metadata
+            out_image = resampled_image.squeeze()
+            out_meta.update({
+                "height": new_height,
+                "width": new_width,
+                "transform": new_transform,
+            })
+
+            # Write the resampled image to a temporary file
+            temp_tif = "temp_resampled.tif"
+            with rasterio.open(temp_tif, "w", **out_meta) as temp_dst:
+                temp_dst.write(out_image, 1)
+
+            # Clip the resampled image back to the original buffered rectangle
+            with rasterio.open(temp_tif) as temp_src:
+                out_image, out_transform = mask(temp_src, [geojson_geom], crop=True)
+
+            out_image = out_image.squeeze()
+
+            # Update metadata again after final clipping
+            out_meta.update({
+                "height": out_image.shape[0],
+                "width": out_image.shape[1],
+                "transform": out_transform,
+            })
+
+            # Remove the temporary file
+            os.remove(temp_tif)
+
+        # Save the clipped and optionally resampled raster to a new file
         output_tif_path = os.path.join(os.path.dirname(input_tif), output_tif)
         with rasterio.open(output_tif_path, "w", **out_meta) as dst:
             dst.write(out_image, 1)  # Write the single band
 
-    print(f"Clipped TIFF file saved as '{output_tif}'")
+    print(f"Clipped{'and resampled ' if target_resolution else ' '}TIFF file saved as '{output_tif}'")
+
 
 def generate_contours(interval):
     """
@@ -435,8 +524,9 @@ def export_to_image_pdf(interval):
     rect = patches.Rectangle((0.001, 0.001), 0.05, 0.01, transform=ax.transAxes, color='white', zorder=2)
     ax.add_patch(rect)
 
-    # Add the 'Äquidistanz' label
-    ax.text(0.001, 0.001, 'Äquidistanz: ' + str(interval)+'m', ha='left', va='bottom', transform=ax.transAxes,
+    # Add the 'Äquidistanz' and 'DEM' label
+    display_value = 0.5 if resample is None else resample
+    ax.text(0.001, 0.001, 'Äquidistanz: ' + str(interval)+'m'+' DEM: '+str(display_value)+'m ' , ha='left', va='bottom', transform=ax.transAxes,
             fontsize=14, color='black', zorder=3)
 
     # Step 7: Save as Image or PDF
@@ -504,6 +594,14 @@ if __name__ == "__main__":
         help="Interval in meters for contour lines (äquidisztanz). Default is 0.2m."
     )
 
+    # Interval argument with flag (optional, defaulting to 10 meters)
+    parser.add_argument(
+        "--resampling",
+        type=float,
+        default=None,
+        help="Resampling in meters . Default is None."
+    )
+
     args = parser.parse_args()
 
     print(" -------------------")
@@ -512,8 +610,15 @@ if __name__ == "__main__":
     print()
     print(" -------------------")
 
+
+
+
+    resample=args.resampling
+    output_folder = os.path.join(os.getcwd(), "swissalti3d_data",str(args.resampling))
+
     # Check for QGIS installation
     check_qgis_installed()
+
 
     # Create the contour lines based on input or default arguments
     buffered_gpkg = create_rectangle_geopackages(args.bbox)
