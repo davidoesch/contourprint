@@ -30,6 +30,76 @@ import io
 import warnings
 import zipfile
 
+"""
+create_rectangle_geopackage.py
+
+This script processes geospatial data to generate contour lines, smooth geometries, and extract roof heights.
+It also creates maps with height information and exports the results to various formats including PDF, DXF, and PNG.
+
+Usage:
+    .venv/bin/python create_rectangle_geopackage.py --bbox "2'604’333/1'197'467 2'604’543/1'197'467 2'604’543/1'197'317 2'604’333/1'197'317" --interval 0.20
+
+Arguments:
+    --bbox (str): Bounding box coordinates in the format X/Y, separated by spaces.
+                  Default: "2'604’333/1'197'467 2'604’543/1'197'467 2'604’543/1'197'317 2'604’333/1'197'317"
+    --interval (float): Interval in meters for contour lines (äquidisztanz). Default is 0.2m.
+    --resampling (float): Resampling in meters. Default is 10.0.
+    --scale (float): Scale in 1:x in meters. Default is 500.
+
+Functions:
+    save_boundary_geometry(geometry, roof_height_max, roof_height_min, uuid, egid, output_path):
+        Save boundary polygon to GeoPackage.
+
+    get_outer_boundary(geom):
+        Get the outer boundary of a TIN geometry.
+
+    convert_gpkg_to_shp(gpkg_path):
+        Convert a GeoPackage file to SHP format.
+
+    parse_coordinates(coord_str):
+        Parse a coordinate string into a tuple of integers.
+
+    create_rectangle_geopackages(coord_string):
+        Create GeoPackages with a rectangle polygon and a 10-meter buffer.
+
+    download_swissalti3d(buffered_rectangle_gpkg):
+        Download the latest swissALTI3D data intersecting the buffered rectangle.
+
+    download_swissbuilding3d(buffered_rectangle_gpkg):
+        Download the latest Swissbuilding data intersecting the buffered rectangle.
+
+    clip_and_resample_dem(buffered_rectangle_gpkg, input_tif, output_tif="swissalti_clipped.tif", target_resolution=None):
+        Clip and optionally resample the input DEM TIFF file.
+
+    generate_contours(interval):
+        Generate contour lines from a raster using gdal_contour.
+
+    convert_close_contours_to_polygons(gdf, tolerance=1e-6):
+        Convert contour lines to polygons if their start and end points are close.
+
+    process_contours(interval):
+        Process contours by generating and converting them to polygons.
+
+    smooth_geometry(interval, input_file, output_file):
+        Smooth the geometry of the lines in the specified input file using QGIS processing.
+
+    merge_smoothed():
+        Merge smoothed contour polygons and lines into a single GeoPackage.
+
+    export_to_image_pdf(interval):
+        Export the contours and rectangle to PDF, PNG, and DXF formats.
+
+    check_qgis_installed():
+        Check if QGIS is installed and accessible.
+
+    process_roof():
+        Process roof data to extract height information and save it to a GeoPackage.
+
+    create_map(maptype, scale, interval):
+        Create a map with the specified type, scale, and interval.
+
+
+"""
 
 # example call: .venv/bin/python create_rectangle_geopackage.py --bbox "2'604’333/1'197'467 2'604’543/1'197'467 2'604’543/1'197'317 2'604’333/1'197'317" --interval 0.20
 
