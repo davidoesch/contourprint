@@ -42,6 +42,8 @@ SWISSALTI3D_COLLECTION = "ch.swisstopo.swissalti3d"
 SWISSBUILDING3D_COLLECTION = "ch.swisstopo.swissbuildings3d_3_0"
 STAC_API_URL = "https://data.geo.admin.ch/api/stac/v0.9"
 
+
+
 def save_boundary_geometry(geometry, roof_height_max,roof_height_min, uuid, egid, output_path):
 
     """
@@ -658,8 +660,7 @@ def export_to_image_pdf(interval):
     # Ensure the rectangle GeoDataFrame is in the correct CRS (EPSG:2056)
     if gdf_rectangle.crs != 'EPSG:2056':
         gdf_rectangle = gdf_rectangle.to_crs(epsg=2056)
-
-    # Step 3: Define a function to set line widths based on elevation
+    #function to set line widths based on elevation
     def get_line_width(elevation):
         if elevation % 10 == 0:
             return 3.5  # Thicker line
@@ -667,7 +668,6 @@ def export_to_image_pdf(interval):
             return 2.5  # Medium thickness
         else:
             return 1.0  # Thinner line
-
     # Apply the function to create a new 'line_width' column
     gdf_contours['line_width'] = gdf_contours['ELEV'].apply(get_line_width)
 
@@ -859,7 +859,7 @@ def process_roof():
     # Convert the output GeoPackage to Shapefile
     convert_gpkg_to_shp(output_height_geometry)
 
-def create_map(maptype,scale):
+def create_map(maptype,scale,interval):
     # Fetch WMS map
     bg_layers = ['ch.kantone.cadastralwebmap-farbe', 'ch.swisstopo.swissimage']
 
@@ -951,11 +951,79 @@ def create_map(maptype,scale):
                 # Annotate the max height
                 plt.text(centroid.x, centroid.y, f'{max_height}', color='green', fontsize=4, ha='center', va='center',
                         bbox=dict(facecolor='white', alpha=0.7, edgecolor='none', pad=0.1))
+        if maptype == "isolinien":
 
-            # Save the map
-            mapname = bg_layer.split('.')[-1]
-            plt.savefig(os.path.join(output_folder,maptype+"_map_"+mapname+".png"),bbox_inches='tight', dpi=300)
-            plt.close()
+            gdf_contours = gpd.read_file(os.path.join(output_folder, "contour_smoothed.gpkg"))
+
+
+
+            # Step 2: Read the Rectangle GeoPackage
+            rectangle_path = os.path.join(output_folder, "rectangle.gpkg")
+            gdf_rectangle = gpd.read_file(rectangle_path)
+
+            # Ensure the rectangle GeoDataFrame is in the correct CRS (EPSG:2056)
+            if gdf_rectangle.crs != 'EPSG:2056':
+                gdf_rectangle = gdf_rectangle.to_crs(epsg=2056)
+            #function to set line widths based on elevation
+            def get_line_width(elevation):
+                if elevation % 10 == 0:
+                    return 3.5  # Thicker line
+                elif elevation % 1 == 0:
+                    return 2.5  # Medium thickness
+                else:
+                    return 1.0  # Thinner line
+            # Apply the function to create a new 'line_width' column
+            gdf_contours['line_width'] = gdf_contours['ELEV'].apply(get_line_width)
+
+            # Plot each contour line
+            for _, row in gdf_contours.iterrows():
+                if row['geometry'] is not None:
+                    x, y = row['geometry'].xy
+                    plt.plot(x, y, linewidth=row['line_width'] + 2, color='white')  # White border
+                    plt.plot(x, y, linewidth=row['line_width'], color='black')  # Black line
+
+                    # Label every second line
+                    if row['line_width'] == 3.5 or row['line_width'] == 2.5:
+                        line = LineString(row['geometry'])
+                        if line.length < 100:
+                            point = line.interpolate(line.length / 2)
+                            x_label, y_label = point.x, point.y
+                            angle = 0
+                            plt.text(x_label, y_label, f"{int(row['ELEV'])} m", fontsize=16, ha='center', va='center', color='blue', rotation=angle, rotation_mode='anchor')
+                        else:
+                            num_labels = int(line.length // 60)
+                            for i in range(num_labels):
+                                distance = i * 60
+                                point = line.interpolate(distance)
+                                x_label, y_label = point.x, point.y
+                                if distance + 1 < line.length:
+                                    next_point = line.interpolate(distance + 1)
+                                    dx = next_point.x - x_label
+                                    dy = next_point.y - y_label
+                                    angle = np.degrees(np.arctan2(dy, dx))
+                                else:
+                                    angle = 0
+                                plt.text(x_label, y_label, f"{int(row['ELEV'])} m", fontsize=16, ha='center', va='center', color='blue', rotation=angle, rotation_mode='anchor')
+
+            # Plot the rectangle overlay
+            for _, rect_row in gdf_rectangle.iterrows():
+                if rect_row['geometry'] is not None:
+                    x_rect, y_rect = rect_row['geometry'].exterior.xy
+                    plt.plot(x_rect, y_rect, color='red', linewidth=2)
+
+            # Add a white rectangle behind the label at the bottom right
+            rect = patches.Rectangle((0.85, 0.01), 1.50, 0.03, transform=plt.gca().transAxes, color='white', zorder=2)
+            plt.gca().add_patch(rect)
+
+            # Add the 'Äquidistanz' and 'DEM' label at the bottom right
+            display_value = 0.5 if resample is None else resample
+            plt.text(0.975, 0.015, 'Äquidistanz: ' + str(interval) + 'm' + ' DEM: ' + str(display_value) + 'm',
+                     ha='right', va='bottom', transform=plt.gca().transAxes, fontsize=14, color='black', zorder=3)
+
+        # Save the map
+        mapname = bg_layer.split('.')[-1]
+        plt.savefig(os.path.join(output_folder,maptype+"_map_"+mapname+".png"),bbox_inches='tight', dpi=300)
+        plt.close()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Create Contour Lines for a specified bounding box and interval in EPSG:2056.")
@@ -1033,6 +1101,8 @@ if __name__ == "__main__":
 
     #exporting to PDF DXF and PNG
     export_to_image_pdf(interval=args.interval)
+    create_map(maptype="isolinien",scale=scale, interval=args.interval)
+
 
     # Roof height
     # Enable exceptions
@@ -1043,9 +1113,9 @@ if __name__ == "__main__":
 
     #extract roof height
     process_roof()
-    breakpoint()
+
     # Create a map with height information
-    create_map(maptype="heightinfo",scale=scale)
+    create_map(maptype="heightinfo",scale=scale, interval=args.interval)
 
     print("All Done")
 
