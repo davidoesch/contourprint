@@ -1,10 +1,11 @@
 import argparse
 import geopandas as gpd
 import pandas as pd
-from shapely.geometry import Polygon,MultiPolygon
+from shapely.geometry import Polygon,MultiPolygon,MultiLineString
 from shapely.geometry import LineString, Point
 from shapely.geometry import box
 from shapely.ops import polygonize
+from shapely.ops import unary_union
 import numpy as np
 import re
 import os
@@ -19,6 +20,15 @@ import sys
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from matplotlib_scalebar.scalebar import ScaleBar
+import math
+from osgeo import ogr, osr
+from owslib.wms import WebMapService
+from PIL import Image
+from io import BytesIO
+import contextlib
+import io
+import warnings
+import zipfile
 
 
 # example call: .venv/bin/python create_rectangle_geopackage.py --bbox "2'604’333/1'197'467 2'604’543/1'197'467 2'604’543/1'197'317 2'604’333/1'197'317" --interval 0.20
@@ -28,8 +38,106 @@ global output_folder
 output_folder = os.path.join(os.getcwd(), "swissalti3d_data")
 BUFFER_M = 10
 SWISSALTI3D_COLLECTION = "ch.swisstopo.swissalti3d"
+SWISSBUILDING3D_COLLECTION = "ch.swisstopo.swissbuildings3d_3_0"
 STAC_API_URL = "https://data.geo.admin.ch/api/stac/v0.9"
 
+def save_boundary_geometry(geometry, roof_height_max,roof_height_min, uuid, egid, output_path):
+
+    """
+    Save boundary polygon to GeoPackage
+
+    Args:
+        geometry: shapely Polygon (the boundary_polygon)
+        height_type: int
+        height: float
+        egid: int
+        output_path: str, path to output GeoPackage file
+    """
+    try:
+        # Create GeoDataFrame
+        gdf = gpd.GeoDataFrame(
+            {
+                'geometry': [geometry],
+                'MAX_HEIGHT': [roof_height_max],
+                'MIN_HEIGHT': [roof_height_min],
+                'UUID': [uuid],
+                'EGID': [egid],
+                'area': [geometry.area]
+            },
+            crs="EPSG:2056"  # Swiss coordinate system
+        )
+        layer_name = 'height'  # or whatever layer name you prefer
+
+        # Save to GeoPackage
+        if os.path.exists(output_path):
+            try:
+                # Try to read existing layer
+                existing_gdf = gpd.read_file(output_path, layer=layer_name)
+                # Append the new data
+                gdf = pd.concat([existing_gdf, gdf], ignore_index=True)
+                # Save with mode='w' to overwrite existing layer
+                gdf.to_file(output_path, layer=layer_name, driver="GPKG", mode='w')
+            except ValueError:
+                # If layer doesn't exist, create new layer
+                gdf.to_file(output_path, layer=layer_name, driver="GPKG", mode='a')
+        else:
+            # If file doesn't exist, create new file
+            gdf.to_file(output_path, layer=layer_name, driver="GPKG")
+
+        #print(f"Successfully saved height to {output_path}, layer: {layer_name}")
+
+    except Exception as e:
+        print(f"An error occurred while saving height: {str(e)}")
+
+def get_outer_boundary(geom):
+    geom_type = geom.GetGeometryType()
+    if geom_type != 1016:  # Direct check for TIN type
+        raise ValueError(f"Expected TIN geometry, got: {geom_type}")
+
+    # Collect all points from all triangles and create small buffers
+    buffers = []
+    for i in range(geom.GetGeometryCount()):
+        triangle = geom.GetGeometryRef(i)
+        ring = triangle.GetGeometryRef(0)
+
+        points = []
+        for j in range(ring.GetPointCount()):
+            point = ring.GetPoint(j)
+            points.append((point[0], point[1]))
+
+        # Create polygon from triangle points and buffer it
+        triangle_poly = Polygon(points)
+        buffered_triangle = triangle_poly.buffer(0.1)  # 0.1m buffer
+        buffers.append(buffered_triangle)
+
+    # Merge all buffers
+    merged_buffer = unary_union(buffers)
+
+    return merged_buffer
+
+def convert_gpkg_to_shp(gpkg_path):
+    """
+    Convert a GeoPackage file to SHP format.
+
+    Args:
+        gpkg_path: str, path to the input GeoPackage file
+        layer_name: str, name of the layer to convert
+        output_path: str, path to the output SHP file
+    """
+    output_path = gpkg_path.replace('.gpkg', '.shp')
+    command = [
+        'ogr2ogr',
+        '-f', 'ESRI Shapefile',  # Output format
+        output_path,  # Output file path
+        gpkg_path,  # Input file path
+
+    ]
+
+    try:
+        subprocess.run(command, check=True)
+        print(f"Successfully exported to {output_path}")
+    except subprocess.CalledProcessError as e:
+        print(f"Error exporting to SHP: {e}")
 
 def parse_coordinates(coord_str):
     """
@@ -177,6 +285,100 @@ def download_swissalti3d(buffered_rectangle_gpkg):
 
     # Clip the swissalti.tif with the buffered rectangle
     clip_and_resample_dem(buffered_rectangle_gpkg, output_filename,target_resolution=resample)
+
+def download_swissbuilding3d(buffered_rectangle_gpkg):
+    """
+    Downloads the latest swSwissbuilding data intersecting the buffered rectangle.
+    The bounding box is transformed from EPSG:2056 to EPSG:4326.
+    """
+    # Initialize transformer from EPSG:2056 to EPSG:4326
+    transformer = Transformer.from_crs("EPSG:2056", "EPSG:4326", always_xy=True)
+
+    # Read the buffered rectangle geometry from GeoPackage
+    buffered_gdf = gpd.read_file(buffered_rectangle_gpkg)
+
+    # Calculate bounding box of buffered area
+    minx, miny, maxx, maxy = buffered_gdf.total_bounds
+
+    # Transform the bounding box to WGS84
+    min_lon, min_lat = transformer.transform(minx, miny)
+    max_lon, max_lat = transformer.transform(maxx, maxy)
+    bbox = [min_lon, min_lat, max_lon, max_lat]
+
+    # Query STAC API for items intersecting the bounding box
+    items_url = f"{STAC_API_URL}/collections/{SWISSBUILDING3D_COLLECTION}/items?bbox={','.join(map(str, bbox))}&limit=100&sortby=-datetime"
+    print(f"Trying to connect to STAC API: ")
+    try:
+        response = requests.get(items_url,timeout=15)
+        items = response.json().get("features", [])
+    except requests.exceptions.RequestException as e:
+        print(f"Failed to connect to STAC API: {e}")
+        return
+
+    if not items:
+        print("No matching data found for the specified area.")
+        return
+
+    # Ensure output folder exists
+    os.makedirs(output_folder, exist_ok=True)
+
+    # Download assets for each matching item
+    GDB_files = []  # List to store paths of downloaded TIFF files
+    for item in items:
+        item_id = item["id"]
+        assets = item.get("assets", {})
+
+        # Filter assets based on the criteria
+        for asset_key, asset in assets.items():
+
+            if ".gdb." in asset_key and "_2021_" in asset_key and asset_key.endswith(".zip"):
+                print("only downloading 2021 data")
+                asset_url = asset["href"]
+                asset_filename = os.path.join(output_folder, f"{item_id}_{asset_key}")
+
+                print(f"Downloading {asset_url} to {asset_filename}")
+                try:
+                    asset_data = requests.get(asset_url,timeout=15)
+                    asset_data.raise_for_status()  # Raise an error for bad responses
+
+                    with open(asset_filename, "wb") as f:
+                        for chunk in asset_data.iter_content(chunk_size=8192):
+                            f.write(chunk)
+
+                    # Add the TIFF file to the list for merging
+                    GDB_files.append(asset_filename)
+
+                except requests.exceptions.RequestException as e:
+                    print(f"Failed to download {asset_url}: {e}")
+
+    print(f"Downloaded data is saved in '{output_folder}'")
+
+    # Define the output filename
+    output_filename = os.path.join(output_folder, "swissbuilding3D.gdb")
+    # Merge TIFF files if more than one is found
+    if len(GDB_files) > 1:
+
+
+        print(f"Multiple GDB files, canot be merged, files stoired here '{output_filename}': adapt the code: give back the list of files, then in roof_process use the list to loop trough the files")
+    elif GDB_files:
+        # If only one TIFF file found, just copy it to the new filename
+        single_file = GDB_files[0]
+        # unzip singel file to output folder with output_filename
+        with zipfile.ZipFile(single_file, 'r') as zip_ref:
+            temp_extract_path = os.path.join(output_folder, "temp_extract")
+            zip_ref.extractall(temp_extract_path)
+            # Move the extracted folder to the desired output path
+            extracted_folder_name = os.listdir(temp_extract_path)[0]
+            extracted_folder_path = os.path.join(temp_extract_path, extracted_folder_name)
+            os.rename(extracted_folder_path, output_filename)
+            # Clean up the temporary extraction path
+            os.rmdir(temp_extract_path)
+        #os.rename(single_file, output_filename)
+
+        print(f"Single GDB file saved as '{output_filename}'")
+    else:
+        print("No GDB files downloaded.")
+
 
 
 def clip_and_resample_dem(buffered_rectangle_gpkg, input_tif, output_tif="swissalti_clipped.tif", target_resolution=None):
@@ -575,6 +777,179 @@ def check_qgis_installed():
         print("Warning: QGIS is not installed or not in PATH. This script requires QGIS to run properly.")
         sys.exit(1)  # Exit if QGIS is not found
 
+def process_roof():
+    input_ds = ogr.Open(os.path.join(output_folder, "swissbuilding3D.gdb"), 0)
+    boundary_ds = ogr.Open(os.path.join(output_folder, "rectangle.gpkg"), 0)
+    output_height_geometry = os.path.join(output_folder, "heightlines.gpkg")
+    # Check if the output file exists, if yes, delete it
+    if os.path.exists(output_height_geometry):
+        os.remove(output_height_geometry)
+
+    # geT layers
+
+    boundary_layer = boundary_ds.GetLayer()
+    input_layer = input_ds.GetLayer("Building_solid")
+    input_layer_roof = input_ds.GetLayer("Roof_solid")
+
+
+
+    # Create a geometry from the boundary extent
+    min_x, max_x, min_y, max_y = boundary_layer.GetExtent()
+    ring = ogr.Geometry(ogr.wkbLinearRing)
+    ring.AddPoint(min_x, min_y)
+    ring.AddPoint(max_x, min_y)
+    ring.AddPoint(max_x, max_y)
+    ring.AddPoint(min_x, max_y)
+    ring.AddPoint(min_x, min_y)
+    boundary_geom = ogr.Geometry(ogr.wkbPolygon)
+    boundary_geom.AddGeometry(ring)
+
+    #list all partial roofs of UUID  which are within the boundary
+    objectid_list = []
+    for feature in input_layer_roof:
+        geom = feature.GetGeometryRef()
+        if boundary_geom.Contains(geom):
+            objectid_list.append(feature.GetField("UUID"))
+
+    print(len(objectid_list))
+    counter=0
+    # Loop through all features wthin boundary and extract information
+    for objectid in objectid_list:
+        print(f"working on roof {counter} of {len(objectid_list)}")
+        # Get the feature with the specific EGID in the input layer
+        input_layer_roof.SetAttributeFilter(f"UUID= '{objectid}'")
+        feature_roof = input_layer_roof.GetNextFeature()
+
+        #check if feature_roof.GetField("EGID") is not None
+        if feature_roof.GetField("EGID") is not None:
+
+            #get variables ROOF
+            roof_max = round(feature_roof.GetField("DACH_MAX"),2)
+            roof_min = round(feature_roof.GetField("DACH_MIN"),2)
+            egid = feature_roof.GetField("EGID")
+
+            #get variables BUILDING
+            input_layer.SetAttributeFilter(f"EGID = '{egid}'")
+            feature = input_layer.GetNextFeature()
+            gesamthoehe = round(feature.GetField("GESAMTHOEHE"), 2)
+            b_dach_max = feature.GetField("DACH_MAX")
+            b_dach_min = feature.GetField("DACH_MIN")
+            b_gelaendehoehe = feature.GetField("GELAENDEPUNKT")
+
+            roof_height_max = round(roof_max- b_gelaendehoehe, 2)
+            roof_height_min = round(roof_min- b_gelaendehoehe, 2)
+
+            # Get the geometry of the feature
+            geom_roof = feature_roof.GetGeometryRef()
+            outer_ring = get_outer_boundary(geom_roof)
+
+            save_boundary_geometry(geometry=outer_ring , roof_height_max =roof_height_max , roof_height_min=roof_height_min , uuid=objectid, egid=egid, output_path=output_height_geometry)
+
+
+        counter += 1
+
+
+    # Convert the output GeoPackage to Shapefile
+    convert_gpkg_to_shp(output_height_geometry)
+
+def create_map(maptype,scale):
+    # Fetch WMS map
+    bg_layers = ['ch.kantone.cadastralwebmap-farbe', 'ch.swisstopo.swissimage']
+
+    for bg_layer in bg_layers:
+        print(f"Fetching WMS map for layer: {bg_layer}")
+        wms_url = 'https://wms.geo.admin.ch/'
+        layer = bg_layer
+        wms = WebMapService(wms_url, version='1.3.0')
+
+        # Read the rectangle GeoPackage to get the boundary geometry
+        boundary_gdf = gpd.read_file(os.path.join(output_folder, "rectangle.gpkg"))
+        boundary_geom = boundary_gdf.geometry.values[0]
+        min_x, min_y, max_x, max_y = boundary_geom.bounds
+
+        width = int((max_x - min_x) / (scale/1000))  # 0.5 is 1:500 scale
+        height = int((max_y - min_y) / (scale/1000))  # 1:500 scale
+        # Suppress all warnings
+        warnings.filterwarnings("ignore")
+
+        with contextlib.redirect_stdout(io.StringIO()): #Suppress wanrings
+            response = wms.getmap(
+                layers=[layer],
+                srs='EPSG:2056',
+                bbox=(min_x, min_y, max_x, max_y),
+                size=(width * 2, height * 2),  # Increase resolution by doubling the size
+                format='image/png',
+                transparent=True
+            )
+        # Re-enable warnings after the operation if needed
+        warnings.filterwarnings("default")
+
+        # Plot the map and points
+        img = Image.open(BytesIO(response.read()))
+        plt.figure(figsize=(33.1, 23.4), dpi=300) # A0 size in inches (landscape)
+        plt.imshow(img, extent=[min_x, max_x, min_y, max_y], alpha=0.75)
+
+
+        # Step 5: Set Axis Limits Based on GeoPackage Extent
+        plt.xlim(min_x, max_x)
+        plt.ylim(min_y, max_y)
+
+        # Keep the aspect ratio of the plot
+        plt.gca().set_aspect('equal', adjustable='box')
+
+        # Adjust ticks to display scale
+        plt.gca().xaxis.set_major_formatter(plt.FuncFormatter(lambda val, pos: f'{int(round(val))}'))
+        plt.gca().yaxis.set_major_formatter(plt.FuncFormatter(lambda val, pos: f'{int(round(val))}'))
+
+        # Add a Simple Scale Bar
+        plt.gca().add_artist(ScaleBar(1))
+
+        # open output_height_geometry and plot the polygon. add the height
+        if maptype == "heightinfo":
+            print("plotting height info")
+            gdf = gpd.read_file(os.path.join(output_folder, "heightlines.gpkg"))
+            for idx, row in gdf.iterrows():
+                polygon = row['geometry']
+                max_height = row['MAX_HEIGHT']
+                min_height = row['MIN_HEIGHT']
+
+                # Plot the polygon
+                x, y = polygon.exterior.xy
+                plt.plot(x, y, color='blue', linewidth=0.5)
+                centroid = polygon.centroid
+
+                # Annotate the max height on the line of the polygon
+                for i, point in enumerate(polygon.exterior.coords[:-1]):
+                    next_point = polygon.exterior.coords[i + 1]
+                    mid_x = (point[0] + next_point[0]) / 2
+                    mid_y = (point[1] + next_point[1]) / 2
+                    # Calculate angle of the line segment
+                    angle = math.degrees(math.atan2(next_point[1] - point[1], next_point[0] - point[0]))
+                    # Calculate length of the line segment
+                    length = np.sqrt((next_point[0] - point[0])**2 + (next_point[1] - point[1])**2)
+
+                    # Only add label if the segment is long enough (adjust threshold as needed)
+                    if length > 5:  # You may need to adjust this threshold
+                        # Calculate position 25% along the line from the start point
+                        label_x = point[0] + 0.25 * (next_point[0] - point[0])
+                        label_y = point[1] + 0.25 * (next_point[1] - point[1])
+
+                        # Rotate text to align with the line
+                        plt.text(label_x, label_y, f'{min_height}', color='red', fontsize=3, ha='center', va='center',
+                                rotation=angle, rotation_mode='anchor',
+                                bbox=dict(facecolor='white', alpha=0.7, edgecolor='none', pad=0.1))
+
+
+
+                # Annotate the max height
+                plt.text(centroid.x, centroid.y, f'{max_height}', color='green', fontsize=4, ha='center', va='center',
+                        bbox=dict(facecolor='white', alpha=0.7, edgecolor='none', pad=0.1))
+
+            # Save the map
+            mapname = bg_layer.split('.')[-1]
+            plt.savefig(os.path.join(output_folder,maptype+"_map_"+mapname+".png"),bbox_inches='tight', dpi=300)
+            plt.close()
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Create Contour Lines for a specified bounding box and interval in EPSG:2056.")
 
@@ -598,8 +973,16 @@ if __name__ == "__main__":
     parser.add_argument(
         "--resampling",
         type=float,
-        default=None,
+        default=10.0,
         help="Resampling in meters . Default is None."
+    )
+
+    # Map Scale default 1:500
+    parser.add_argument(
+        "--scale",
+        type=float,
+        default=500,
+        help="Scale in 1:x in meters . Default is 500."
     )
 
     args = parser.parse_args()
@@ -610,9 +993,10 @@ if __name__ == "__main__":
     print()
     print(" -------------------")
 
+    # Set the resampling value
+    scale=args.scale
 
-
-
+    # Set the resampling value
     resample=args.resampling
     output_folder = os.path.join(os.getcwd(), "swissalti3d_data",str(args.resampling))
 
@@ -642,3 +1026,20 @@ if __name__ == "__main__":
 
     #exporting to PDF DXF and PNG
     export_to_image_pdf(interval=args.interval)
+
+    # Roof height
+    # Enable exceptions
+    ogr.UseExceptions()
+
+    # Download the Swissbuilding3D data
+    download_swissbuilding3d(buffered_gpkg)
+
+    #extract roof height
+    process_roof()
+
+    # Create a map with height information
+    create_map(maptype="heightinfo",scale=scale)
+
+    print("All Done")
+
+
