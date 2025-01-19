@@ -35,7 +35,8 @@ import zipfile
 
 global resample
 global output_folder
-output_folder = os.path.join(os.getcwd(), "swissalti3d_data")
+destionation_name = "results"
+output_folder = os.path.join(os.getcwd(), destionation_name )
 BUFFER_M = 10
 SWISSALTI3D_COLLECTION = "ch.swisstopo.swissalti3d"
 SWISSBUILDING3D_COLLECTION = "ch.swisstopo.swissbuildings3d_3_0"
@@ -370,6 +371,12 @@ def download_swissbuilding3d(buffered_rectangle_gpkg):
             # Move the extracted folder to the desired output path
             extracted_folder_name = os.listdir(temp_extract_path)[0]
             extracted_folder_path = os.path.join(temp_extract_path, extracted_folder_name)
+            if os.path.exists(output_filename):
+                if os.path.isdir(output_filename):
+                    import shutil
+                    shutil.rmtree(output_filename)
+                else:
+                    os.remove(output_filename)
             os.rename(extracted_folder_path, output_filename)
             # Clean up the temporary extraction path
             os.rmdir(temp_extract_path)
@@ -998,7 +1005,7 @@ if __name__ == "__main__":
 
     # Set the resampling value
     resample=args.resampling
-    output_folder = os.path.join(os.getcwd(), "swissalti3d_data",str(args.resampling))
+    output_folder = os.path.join(os.getcwd(), destionation_name ,str(args.resampling))
 
     # Check for QGIS installation
     check_qgis_installed()
@@ -1036,7 +1043,7 @@ if __name__ == "__main__":
 
     #extract roof height
     process_roof()
-
+    breakpoint()
     # Create a map with height information
     create_map(maptype="heightinfo",scale=scale)
 
