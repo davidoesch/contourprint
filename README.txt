@@ -11,6 +11,7 @@ According https://opensourceoptions.com/how-to-create-contour-lines-and-labels-w
 buffer aoi 10m
 clip with buffer
 run contour
+
 smooth with iteration 10, offset 0.125
 
 copy styles https://gis.stackexchange.com/a/301965/190185
