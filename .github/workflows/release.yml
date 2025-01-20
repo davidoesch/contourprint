@@ -14,7 +14,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Get latest tag
+      - name: Get latest tag now
         id: get_latest_tag
         run: echo "LATEST_TAG=$(git describe --tags --abbrev=0 || echo v0.0.0)" >> $GITHUB_OUTPUT
 
