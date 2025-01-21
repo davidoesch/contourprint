@@ -155,6 +155,7 @@ for feature in input_layer_roof:
         objectid_list.append(feature.GetField("UUID"))
 
 print(len(objectid_list))
+breakpoint()
 counter=0
 # Loop through all features wthin boundary and extract information
 for objectid in objectid_list:
@@ -179,8 +180,13 @@ for objectid in objectid_list:
         b_dach_min = feature.GetField("DACH_MIN")
         b_gelaendehoehe = feature.GetField("GELAENDEPUNKT")
 
-        roof_height_max = round(roof_max- b_gelaendehoehe, 2)
-        roof_height_min = round(roof_min- b_gelaendehoehe, 2)
+        #calculate roof height
+        # roof_height_max = round(roof_max- b_gelaendehoehe, 2)
+        # roof_height_min = round(roof_min- b_gelaendehoehe, 2)
+
+        #calculate roof altitude above ground
+        roof_height_max = roof_max
+        roof_height_min = roof_min
 
         # Get the geometry of the feature
         geom_roof = feature_roof.GetGeometryRef()
@@ -203,89 +209,103 @@ for bg_layer in bg_layers:
     wms_url = 'https://wms.geo.admin.ch/'
     layer = bg_layer
     wms = WebMapService(wms_url, version='1.3.0')
+
     # Calculate width and height based on the boundary extent and scale of 1:500
     min_x, max_x, min_y, max_y = boundary_geom.GetEnvelope()
-    width = int((max_x - min_x) / 0.5)  # 1:500 scale
-    height = int((max_y - min_y) / 0.5)  # 1:500 scale
+    scale = 500  # 1:500 scale
+    # Convert map units to pixels (1 meter = 2 pixels for higher resolution)
+    pixels_per_meter = 2
+    width = int((max_x - min_x) * pixels_per_meter)
+    height = int((max_y - min_y) * pixels_per_meter)
+
     # Suppress all warnings
     warnings.filterwarnings("ignore")
 
-    with contextlib.redirect_stdout(io.StringIO()): #Suppress wanrings
+    with contextlib.redirect_stdout(io.StringIO()): #Suppress warnings
         response = wms.getmap(
             layers=[layer],
             srs='EPSG:2056',
             bbox=(min_x, min_y, max_x, max_y),
-            size=(width * 2, height * 2),  # Increase resolution by doubling the size
+            size=(width, height),
             format='image/png',
             transparent=True
         )
-    # Re-enable warnings after the operation if needed
     warnings.filterwarnings("default")
 
-    # Plot the map and points
+    # Create figure with A0 dimensions
+    a0_width_inches = 33.1
+    a0_height_inches = 23.4
+    fig = plt.figure(figsize=(a0_width_inches, a0_height_inches), dpi=300)
+
+    # Calculate the map dimensions in inches at 1:500 scale
+    # 1 meter = 0.0394 inches, then divide by scale factor
+    map_width_inches = (max_x - min_x) * 0.0394 / scale
+    map_height_inches = (max_y - min_y) * 0.0394 / scale
+
+    # Calculate margins to center the map
+    left_margin = (a0_width_inches - map_width_inches) / 2
+    bottom_margin = (a0_height_inches - map_height_inches) / 2
+
+    # Create axes with the correct size and position
+    ax = fig.add_axes([
+        left_margin / a0_width_inches,  # left
+        bottom_margin / a0_height_inches,  # bottom
+        map_width_inches / a0_width_inches,  # width
+        map_height_inches / a0_height_inches  # height
+    ])
+
+    # Plot the map
     img = Image.open(BytesIO(response.read()))
-    plt.figure(figsize=(33.1, 23.4), dpi=300) # A0 size in inches (landscape)
-    plt.imshow(img, extent=[min_x, max_x, min_y, max_y], alpha=0.75)
+    ax.imshow(img, extent=[min_x, max_x, min_y, max_y], alpha=0.75)
 
+    # Set limits and aspect ratio
+    ax.set_xlim(min_x, max_x)
+    ax.set_ylim(min_y, max_y)
+    ax.set_aspect('equal')
 
-    # Step 5: Set Axis Limits Based on GeoPackage Extent
-    plt.xlim(min_x, max_x)
-    plt.ylim(min_y, max_y)
+    # Format axis labels
+    ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda val, pos: f'{int(round(val))}'))
+    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda val, pos: f'{int(round(val))}'))
 
-    # Keep the aspect ratio of the plot
-    plt.gca().set_aspect('equal', adjustable='box')
+    # Add scale bar
+    ax.add_artist(ScaleBar(1))
 
-    # Adjust ticks to display scale
-    plt.gca().xaxis.set_major_formatter(plt.FuncFormatter(lambda val, pos: f'{int(round(val))}'))
-    plt.gca().yaxis.set_major_formatter(plt.FuncFormatter(lambda val, pos: f'{int(round(val))}'))
-
-    # Add a Simple Scale Bar
-    plt.gca().add_artist(ScaleBar(1))
-
-    # open output_height_geometry and plot the polygon. add the height
-
+    # Plot geometries from GeoPackage
     gdf = gpd.read_file(output_height_geometry)
     for idx, row in gdf.iterrows():
         polygon = row['geometry']
         max_height = row['MAX_HEIGHT']
         min_height = row['MIN_HEIGHT']
 
-        # Plot the polygon
+        # Plot polygon
         x, y = polygon.exterior.xy
-        plt.plot(x, y, color='blue', linewidth=0.5)
+        ax.plot(x, y, color='blue', linewidth=0.5)
         centroid = polygon.centroid
 
-        # Annotate the max height on the line of the polygon
+        # Add height annotations
         for i, point in enumerate(polygon.exterior.coords[:-1]):
             next_point = polygon.exterior.coords[i + 1]
             mid_x = (point[0] + next_point[0]) / 2
             mid_y = (point[1] + next_point[1]) / 2
-            # Calculate angle of the line segment
             angle = math.degrees(math.atan2(next_point[1] - point[1], next_point[0] - point[0]))
-            # Calculate length of the line segment
             length = np.sqrt((next_point[0] - point[0])**2 + (next_point[1] - point[1])**2)
 
-            # Only add label if the segment is long enough (adjust threshold as needed)
-            if length > 5:  # You may need to adjust this threshold
-                # Calculate position 25% along the line from the start point
+            if length > 5:
                 label_x = point[0] + 0.25 * (next_point[0] - point[0])
                 label_y = point[1] + 0.25 * (next_point[1] - point[1])
 
-                # Rotate text to align with the line
-                plt.text(label_x, label_y, f'{min_height}', color='red', fontsize=3, ha='center', va='center',
-                        rotation=angle, rotation_mode='anchor',
-                        bbox=dict(facecolor='white', alpha=0.7, edgecolor='none', pad=0.1))
+                ax.text(label_x, label_y, f'{min_height}', color='red', fontsize=3,
+                       ha='center', va='center', rotation=angle, rotation_mode='anchor',
+                       bbox=dict(facecolor='white', alpha=0.7, edgecolor='none', pad=0.1))
 
-
-
-        # Annotate the max height
-        plt.text(centroid.x, centroid.y, f'{max_height}', color='green', fontsize=4, ha='center', va='center',
-                bbox=dict(facecolor='white', alpha=0.7, edgecolor='none', pad=0.1))
-
+        # Add max height annotation
+        ax.text(centroid.x, centroid.y, f'{max_height}', color='green', fontsize=4,
+               ha='center', va='center',
+               bbox=dict(facecolor='white', alpha=0.7, edgecolor='none', pad=0.1))
 
     # Save the map
     maptype = bg_layer.split('.')[-1]
-    plt.savefig(root_url+"heightinfo_map_"+maptype+".png",bbox_inches='tight', dpi=300)
+    plt.savefig(root_url + "heightinfo_map_" + maptype + ".png", bbox_inches='tight', dpi=300)
     plt.close()
 
 # Clean up

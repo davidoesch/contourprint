@@ -913,8 +913,13 @@ def process_roof():
             b_dach_min = feature.GetField("DACH_MIN")
             b_gelaendehoehe = feature.GetField("GELAENDEPUNKT")
 
-            roof_height_max = round(roof_max- b_gelaendehoehe, 2)
-            roof_height_min = round(roof_min- b_gelaendehoehe, 2)
+            #calculate the height of the roof
+            # roof_height_max = round(roof_max- b_gelaendehoehe, 2)
+            # roof_height_min = round(roof_min- b_gelaendehoehe, 2)
+
+            #Absolute roof height
+            roof_height_max = roof_max
+            roof_height_min = roof_min
 
             # Get the geometry of the feature
             geom_roof = feature_roof.GetGeometryRef()
