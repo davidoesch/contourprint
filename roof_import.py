@@ -204,61 +204,98 @@ convert_gpkg_to_shp(output_height_geometry)
 # Fetch WMS map
 bg_layers = ['ch.kantone.cadastralwebmap-farbe', 'ch.swisstopo.swissimage']
 
+def fetch_and_stitch_tiles(wms, layer, bbox, target_width, target_height, max_tile_size=3300):
+    """
+    Fetch large WMS maps by splitting into tiles and stitching them together
+    """
+    min_x, min_y, max_x, max_y = bbox
+
+    # Calculate number of tiles needed
+    num_tiles_x = math.ceil(target_width / max_tile_size)
+    num_tiles_y = math.ceil(target_height / max_tile_size)
+
+    # Calculate tile sizes
+    tile_width = target_width // num_tiles_x
+    tile_height = target_height // num_tiles_y
+
+    # Create empty image to hold the complete map
+    complete_image = Image.new('RGBA', (target_width, target_height))
+
+    for i in range(num_tiles_x):
+        for j in range(num_tiles_y):
+            # Calculate tile boundaries
+            tile_min_x = min_x + (max_x - min_x) * i / num_tiles_x
+            tile_max_x = min_x + (max_x - min_x) * (i + 1) / num_tiles_x
+            tile_min_y = min_y + (max_y - min_y) * j / num_tiles_y
+            tile_max_y = min_y + (max_y - min_y) * (j + 1) / num_tiles_y
+
+            # Calculate pixel position for this tile
+            x_offset = i * tile_width
+            y_offset = (num_tiles_y - 1 - j) * tile_height  # Flip Y coordinate
+
+            with contextlib.redirect_stdout(io.StringIO()):  # Suppress warnings
+                response = wms.getmap(
+                    layers=[layer],
+                    srs='EPSG:2056',
+                    bbox=(tile_min_x, tile_min_y, tile_max_x, tile_max_y),
+                    size=(tile_width, tile_height),
+                    format='image/png',
+                    transparent=True
+                )
+
+            # Open tile image and paste into the complete image
+            tile_img = Image.open(BytesIO(response.read()))
+            complete_image.paste(tile_img, (x_offset, y_offset))
+
+    return complete_image
+
 for bg_layer in bg_layers:
     print(f"Fetching WMS map for layer: {bg_layer}")
     wms_url = 'https://wms.geo.admin.ch/'
     layer = bg_layer
     wms = WebMapService(wms_url, version='1.3.0')
 
-    # Calculate width and height based on the boundary extent and scale of 1:500
+    # Calculate real-world dimensions in meters
     min_x, max_x, min_y, max_y = boundary_geom.GetEnvelope()
-    scale = 500  # 1:500 scale
-    # Convert map units to pixels (1 meter = 2 pixels for higher resolution)
-    pixels_per_meter = 2
-    width = int((max_x - min_x) * pixels_per_meter)
-    height = int((max_y - min_y) * pixels_per_meter)
+    width_meters = max_x - min_x
+    height_meters = max_y - min_y
 
-    # Suppress all warnings
-    warnings.filterwarnings("ignore")
+    # Scale is 1:500
+    scale = 500
 
-    with contextlib.redirect_stdout(io.StringIO()): #Suppress warnings
-        response = wms.getmap(
-            layers=[layer],
-            srs='EPSG:2056',
-            bbox=(min_x, min_y, max_x, max_y),
-            size=(width, height),
-            format='image/png',
-            transparent=True
-        )
-    warnings.filterwarnings("default")
+    # Calculate physical size on paper (in meters)
+    width_on_paper_meters = width_meters / scale
+    height_on_paper_meters = height_meters / scale
 
-    # Create figure with A0 dimensions
-    a0_width_inches = 33.1
-    a0_height_inches = 23.4
-    fig = plt.figure(figsize=(a0_width_inches, a0_height_inches), dpi=300)
+    # Convert to inches for matplotlib (1 meter = 39.37 inches)
+    width_inches = width_on_paper_meters * 39.37
+    height_inches = height_on_paper_meters * 39.37
 
-    # Calculate the map dimensions in inches at 1:500 scale
-    # 1 meter = 0.0394 inches, then divide by scale factor
-    map_width_inches = (max_x - min_x) * 0.0394 / scale
-    map_height_inches = (max_y - min_y) * 0.0394 / scale
+    # Calculate pixel dimensions for 300 DPI
+    width_pixels = int(width_inches * 300)
+    height_pixels = int(height_inches * 300)
 
-    # Calculate margins to center the map
-    left_margin = (a0_width_inches - map_width_inches) / 2
-    bottom_margin = (a0_height_inches - map_height_inches) / 2
+    print(f"Required image dimensions: {width_pixels}x{height_pixels} pixels")
 
-    # Create axes with the correct size and position
-    ax = fig.add_axes([
-        left_margin / a0_width_inches,  # left
-        bottom_margin / a0_height_inches,  # bottom
-        map_width_inches / a0_width_inches,  # width
-        map_height_inches / a0_height_inches  # height
-    ])
+    # Fetch tiled map
+    img = fetch_and_stitch_tiles(
+        wms,
+        layer,
+        (min_x, min_y, max_x, max_y),
+        width_pixels,
+        height_pixels
+    )
 
-    # Plot the map
-    img = Image.open(BytesIO(response.read()))
-    ax.imshow(img, extent=[min_x, max_x, min_y, max_y], alpha=0.75)
+    # Create figure at the exact size needed for 1:500 scale
+    fig = plt.figure(figsize=(width_inches, height_inches), dpi=300)
+    ax = fig.add_subplot(111)
+    ax.set_position([0, 0, 1, 1])
 
-    # Set limits and aspect ratio
+    # Convert PIL image to array and plot
+    img_array = np.array(img)
+    ax.imshow(img_array, extent=[min_x, max_x, min_y, max_y], alpha=0.75)
+
+    # Set limits
     ax.set_xlim(min_x, max_x)
     ax.set_ylim(min_y, max_y)
     ax.set_aspect('equal')
@@ -277,12 +314,10 @@ for bg_layer in bg_layers:
         max_height = row['MAX_HEIGHT']
         min_height = row['MIN_HEIGHT']
 
-        # Plot polygon
         x, y = polygon.exterior.xy
         ax.plot(x, y, color='blue', linewidth=0.5)
         centroid = polygon.centroid
 
-        # Add height annotations
         for i, point in enumerate(polygon.exterior.coords[:-1]):
             next_point = polygon.exterior.coords[i + 1]
             mid_x = (point[0] + next_point[0]) / 2
@@ -298,14 +333,13 @@ for bg_layer in bg_layers:
                        ha='center', va='center', rotation=angle, rotation_mode='anchor',
                        bbox=dict(facecolor='white', alpha=0.7, edgecolor='none', pad=0.1))
 
-        # Add max height annotation
         ax.text(centroid.x, centroid.y, f'{max_height}', color='green', fontsize=4,
                ha='center', va='center',
                bbox=dict(facecolor='white', alpha=0.7, edgecolor='none', pad=0.1))
 
     # Save the map
     maptype = bg_layer.split('.')[-1]
-    plt.savefig(root_url + "heightinfo_map_" + maptype + ".png", bbox_inches='tight', dpi=300)
+    plt.savefig(root_url + "heightinfo_map_" + maptype + ".png", dpi=300, pad_inches=0)
     plt.close()
 
 # Clean up
