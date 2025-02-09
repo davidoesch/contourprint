@@ -30,6 +30,8 @@ import io
 import warnings
 import zipfile
 
+from scipy.interpolate import splprep, splev
+
 """
 create_rectangle_geopackage.py
 
@@ -658,11 +660,11 @@ def process_contours(interval):
     print(f"Contour lines saved to '{lines_output}'")
 
 def smooth_geometry(interval,input_file,output_file):
-    """
-    Smooths the geometry of the lines in the specified input file using QGIS processing.
 
-    : interval smoothing minimum distance.  Normally 0.25m
-    """
+    #Smooths the geometry of the lines in the specified input file using QGIS processing.
+
+    #: interval smoothing minimum distance.  Normally 0.25m
+
 
     offset=0.25
     # Define the QGIS process command
@@ -686,6 +688,122 @@ def smooth_geometry(interval,input_file,output_file):
         #print(result.stdout)
     except subprocess.CalledProcessError as e:
         print(f"An error occurred in {output_file} : {e.stderr}")
+
+
+
+
+
+# from shapely.geometry import LineString, MultiLineString, Polygon, MultiPolygon
+# import geopandas as gpd
+# from scipy.interpolate import splprep, splev
+# import numpy as np
+
+# def smooth_line(line, smoothing_factor=0.25, num_points=100):
+#     """
+#     Smooths a line using B-spline interpolation.
+
+#     Args:
+#         line: Shapely LineString object or list of coordinates
+#         smoothing_factor: Controls how closely the smoothed line follows the original (0-1)
+#         num_points: Number of points to generate for the smoothed line
+
+#     Returns:
+#         Shapely LineString with smoothed geometry
+#     """
+#     # Convert input to numpy array if it's not already
+#     coords = np.array(line.coords if hasattr(line, 'coords') else line)
+
+#     # If we have too few points, return original line
+#     if len(coords) < 4:
+#         return LineString(coords)
+
+#     # Separate x and y coordinates
+#     x = coords[:, 0]
+#     y = coords[:, 1]
+
+#     # Fit B-spline
+#     try:
+#         # Calculate parameter t based on cumulative distance
+#         t = np.zeros(len(coords))
+#         for i in range(1, len(coords)):
+#             t[i] = t[i-1] + np.sqrt(np.sum((coords[i] - coords[i-1])**2))
+#         t = t/t[-1]
+
+#         # Fit the spline
+#         tck, u = splprep([x, y], u=t, s=smoothing_factor, k=3, per=1 if np.allclose(coords[0], coords[-1]) else 0)
+
+#         # Generate new points
+#         new_points = np.linspace(0, 1, num_points)
+#         smoothed_x, smoothed_y = splev(new_points, tck)
+
+#         # Create new LineString
+#         return LineString(np.column_stack([smoothed_x, smoothed_y]))
+#     except:
+#         # If spline fitting fails, return original line
+#         return LineString(coords)
+
+# def smooth_polygon(poly, smoothing_factor=0.25, num_points=100):
+#     """
+#     Smooths a polygon by smoothing its exterior and interior rings.
+
+#     Args:
+#         poly: Shapely Polygon object
+#         smoothing_factor: Smoothing factor
+#         num_points: Number of points for the smoothed result
+
+#     Returns:
+#         Shapely Polygon with smoothed boundaries
+#     """
+#     # Smooth exterior ring
+#     smoothed_exterior = smooth_line(poly.exterior.coords, smoothing_factor, num_points)
+
+#     # Smooth interior rings if any
+#     smoothed_interiors = []
+#     for interior in poly.interiors:
+#         smoothed_interior = smooth_line(interior.coords, smoothing_factor, num_points)
+#         smoothed_interiors.append(smoothed_interior)
+
+#     # Create new polygon with smoothed boundaries
+#     return Polygon(smoothed_exterior, [inner for inner in smoothed_interiors])
+
+# def smooth_geometry_element(geom, smoothing_factor=0.25):
+#     """
+#     Smooths different types of geometries.
+#     """
+#     if isinstance(geom, LineString):
+#         return smooth_line(geom, smoothing_factor=smoothing_factor)
+#     elif isinstance(geom, MultiLineString):
+#         smoothed_lines = [smooth_line(line, smoothing_factor=smoothing_factor)
+#                          for line in geom.geoms]
+#         return MultiLineString(smoothed_lines)
+#     elif isinstance(geom, Polygon):
+#         return smooth_polygon(geom, smoothing_factor=smoothing_factor)
+#     elif isinstance(geom, MultiPolygon):
+#         smoothed_polys = [smooth_polygon(poly, smoothing_factor=smoothing_factor)
+#                          for poly in geom.geoms]
+#         return MultiPolygon(smoothed_polys)
+#     return geom
+
+# def smooth_geometry(interval, input_file, output_file):
+#     """
+#     Smooths the geometry of features in the specified input file.
+#     Supports LineString, MultiLineString, Polygon, and MultiPolygon geometries.
+
+#     Args:
+#         interval: Smoothing factor (similar to QGIS offset). Lower values = closer to original.
+#                  Recommended range: 0.1-1.0
+#         input_file: Path to input GeoJSON/Shapefile
+#         output_file: Path to save the smoothed geometries
+#     """
+#     # Read the input file
+#     breakpoint()
+#     gdf = gpd.read_file(input_file)
+
+#     # Apply smoothing to each geometry
+#     gdf.geometry = gdf.geometry.apply(lambda geom: smooth_geometry_element(geom, smoothing_factor=interval))
+
+#     # Save to output file
+#     gdf.to_file(output_file)
 
 def merge_smoothed():
     # Read the polygon and line files
