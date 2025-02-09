@@ -1097,7 +1097,7 @@ def create_map(maptype,scale,interval):
 
         # Save the map
         mapname = bg_layer.split('.')[-1]
-        plt.savefig(os.path.join(output_folder,maptype+"_map_"+mapname+".png"),bbox_inches='tight', dpi=300)
+        plt.savefig(os.path.join(output_folder,maptype+"_map_"+mapname+".pdf"),bbox_inches='tight', dpi=300)
         plt.close()
 
 if __name__ == "__main__":

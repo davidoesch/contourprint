@@ -1,0 +1,13 @@
+argparse
+geopandas
+pandas
+shapely
+numpy
+requests
+pyproj
+rasterio
+matplotlib
+matplotlib-scalebar
+pygdal
+owslib
+Pillow
