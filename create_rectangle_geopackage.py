@@ -40,7 +40,7 @@ It also creates maps with height information and exports the results to various 
 
 Usage:
     .venv/bin/python create_rectangle_geopackage.py --bbox "2'604’333/1'197'467 2'604’543/1'197'467 2'604’543/1'197'317 2'604’333/1'197'317" --interval 0.20
-
+    
 Arguments:
     --bbox (str): Bounding box coordinates in the format X/Y, separated by spaces.
                   Default: "2'604’333/1'197'467 2'604’543/1'197'467 2'604’543/1'197'317 2'604’333/1'197'317"

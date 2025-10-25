@@ -468,7 +468,7 @@ def export_to_image_pdf(interval, resample=None):
     # Step 4: Plot Setup
     min_x, min_y, max_x, max_y = gdf_contours.total_bounds
     fig, ax = plt.subplots(figsize=(841 / 25.4, 1189 / 25.4), dpi=300)  # A0 size in inches
-    breakpoint()
+
     # Step 5: WMS Background
     wms_url = 'https://wms.geo.admin.ch/'  # Example: Swiss WMS service
     layer = 'ch.swisstopo.swissimage'      # Layer (e.g., Swissimage aerial imagery)

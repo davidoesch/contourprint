@@ -18,12 +18,13 @@ For more details, refer to:
 
 Run the script from the command line as follows:
 ```bash
-.venv/bin/python create_rectangle_geopackage.py --bbox "2'604’333/1'197'467 2'604’543/1'197'467 2'604’543/1'197'317 2'604’333/1'197'317" --interval 0.20
+.venv/bin/python create_rectangle_geopackage.py --bbox "2'600'755/1'201'197 2'600'828/1'201'095 2'600'922/1'201'162 2'600'849/1'201'264" --interval 0.50 --resampling 0.5 --scale 500
 
 Arguments
 --bbox (str): Bounding box coordinates in the format X/Y, separated by spaces. Default: "2'604’333/1'197'467 2'604’543/1'197'467 2'604’543/1'197'317 2'604’333/1'197'317"
 --interval (float): Interval in meters for contour lines (äquidisztanz). Default is 0.2m.
 --resampling (float): Resampling in meters. Default is 10.0.
+--scale (float): Default 500
 
 ## Requirements
 
