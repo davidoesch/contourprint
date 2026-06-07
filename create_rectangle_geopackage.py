@@ -216,10 +216,10 @@ def convert_gpkg_to_shp(gpkg_path):
 
 def parse_coordinates(coord_str):
     """
-    Parses a coordinate string in the format "2'604’333/1'197'467" into a tuple of integers.
+    Parses a coordinate string in the format "2’604’333/1’197’467" or "2’671’701.50/1’170’109.75" into a tuple of floats.
     """
-    x_str, y_str = re.sub(r"[^\d/]", "", coord_str).split("/")
-    return int(x_str), int(y_str)
+    x_str, y_str = re.sub(r"[^\d./]", "", coord_str).split("/")
+    return float(x_str), float(y_str)
 
 def create_rectangle_geopackages(coord_string):
 
@@ -665,7 +665,6 @@ def smooth_geometry(interval,input_file,output_file):
 
     #: interval smoothing minimum distance.  Normally 0.25m
 
-
     offset=0.25
     # Define the QGIS process command
     command = [
@@ -681,13 +680,32 @@ def smooth_geometry(interval,input_file,output_file):
         f"--OUTPUT={output_file}"
     ]
 
+    # Run qgis_process with a clean environment (no .venv paths) so QGIS can
+    # find its own Python/SIP modules even when launched from an active virtualenv.
+    import copy
+    env = copy.copy(os.environ)
+    venv = env.pop("VIRTUAL_ENV", None)
+    if venv:
+        env["PATH"] = ":".join(
+            p for p in env.get("PATH", "").split(":") if not p.startswith(venv)
+        )
+        env["PYTHONPATH"] = ":".join(
+            p for p in env.get("PYTHONPATH", "").split(":") if not p.startswith(venv)
+        )
+
     try:
-        # Run the command
-        result = subprocess.run(command)#, check=True, capture_output=True, text=True)
+        result = subprocess.run(command, check=True, env=env)
         print(f"Smoothing {output_file} completed successfully.")
-        #print(result.stdout)
     except subprocess.CalledProcessError as e:
-        print(f"An error occurred in {output_file} : {e.stderr}")
+        print(f"An error occurred in {output_file} : {e}")
+        raise
+
+    output_path = output_file.split("|")[0]
+    if not os.path.exists(output_path):
+        raise FileNotFoundError(
+            f"qgis_process finished but did not create '{output_path}'. "
+            "Check that qgis_process is working correctly."
+        )
 
 
 
